@@ -1,0 +1,7 @@
+.DS_Store
+__pycache__
+.venv
+models
+build
+*.so
+audio_samples
