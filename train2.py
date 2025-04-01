@@ -7,14 +7,14 @@ import time
 import os
 
 # Training Configuration
-NUM_ENVS = 256
+NUM_ENVS = 1024
 OBS_DIM = 128
-ACTION_DIM = 16
+ACTION_DIM = 80
 LEARNING_RATE = 3e-4
-GAMMA = 0.99
+GAMMA = 0.90
 EPOCHS = 1000
 STEPS_PER_EPOCH = 500
-BATCH_SIZE = 256
+BATCH_SIZE = 256 + 256
 CLIP_RATIO = 0.2
 VALUE_COEF = 0.5
 ENTROPY_COEF = 0.01
@@ -60,7 +60,8 @@ class PolicyNetwork(nn.Module):
         return self.policy(x), self.value(x)
 
     def get_action_and_value(self, obs, deterministic=False, noise_scale=None):
-        obs_tensor = torch.FloatTensor(obs)
+        # Move observation to the correct device
+        obs_tensor = torch.FloatTensor(obs).to(device)
         with torch.no_grad():
             mean, value = self(obs_tensor)
             
@@ -70,10 +71,11 @@ class PolicyNetwork(nn.Module):
                     noise = torch.randn_like(mean) * noise_scale
                     action = mean + noise
                     action = torch.clamp(action, -1.0, 1.0)
-                    return action.numpy(), value.squeeze(-1).numpy()
+                    # Move data back to CPU for numpy conversion
+                    return action.cpu().numpy(), value.squeeze(-1).cpu().numpy()
                 else:
                     # Completely deterministic
-                    return mean.numpy(), value.squeeze(-1).numpy()
+                    return mean.cpu().numpy(), value.squeeze(-1).cpu().numpy()
             
             # Standard stochastic sampling
             std = torch.exp(self.log_std)
@@ -86,7 +88,8 @@ class PolicyNetwork(nn.Module):
             # Log probability of the action
             log_prob = distribution.log_prob(action).sum(-1)
             
-            return action.numpy(), value.squeeze(-1).numpy(), log_prob.numpy()
+            # Move data back to CPU for numpy conversion
+            return action.cpu().numpy(), value.squeeze(-1).cpu().numpy(), log_prob.cpu().numpy()
     
     def evaluate_actions(self, obs, actions):
         mean, value = self(obs)
@@ -103,8 +106,8 @@ def train_ppo():
     # Initialize environment
     env = ParallelAudioRL(num_envs=NUM_ENVS)
     
-    # Initialize policy
-    policy = PolicyNetwork(OBS_DIM, ACTION_DIM)
+    # Initialize policy and move to device
+    policy = PolicyNetwork(OBS_DIM, ACTION_DIM).to(device)
     optimizer = optim.Adam(policy.parameters(), lr=LEARNING_RATE)
     
     # Initial reset
@@ -157,6 +160,9 @@ def train_ppo():
         # Calculate steps per second
         steps_per_second = STEPS_PER_EPOCH * NUM_ENVS / (time.time() - epoch_start_time)
         
+        # Optimization phase start time
+        opt_start_time = time.time()
+        
         # Compute returns and advantages
         returns = np.zeros_like(batch_rewards)
         advantages = np.zeros_like(batch_rewards)
@@ -179,11 +185,12 @@ def train_ppo():
             
         returns = advantages + np.array(batch_values)
 
-        b_obs = torch.FloatTensor(np.array(batch_obs).reshape(-1, OBS_DIM))
-        b_actions = torch.FloatTensor(np.array(batch_actions).reshape(-1, ACTION_DIM))
-        b_log_probs = torch.FloatTensor(np.array(batch_log_probs).reshape(-1))
-        b_advantages = torch.FloatTensor(advantages.reshape(-1))
-        b_returns = torch.FloatTensor(returns.reshape(-1))
+        # Move all data to device in one go for efficiency
+        b_obs = torch.FloatTensor(np.array(batch_obs).reshape(-1, OBS_DIM)).to(device)
+        b_actions = torch.FloatTensor(np.array(batch_actions).reshape(-1, ACTION_DIM)).to(device)
+        b_log_probs = torch.FloatTensor(np.array(batch_log_probs).reshape(-1)).to(device)
+        b_advantages = torch.FloatTensor(advantages.reshape(-1)).to(device)
+        b_returns = torch.FloatTensor(returns.reshape(-1)).to(device)
         
         # Policy update
         for _ in range(4):  # Multiple epochs over the same data
@@ -193,7 +200,7 @@ def train_ppo():
                 end_idx = min(start_idx + BATCH_SIZE, len(b_obs))
                 batch_indices = indices[start_idx:end_idx]
                 
-                # Get batch data
+                # Get batch data (already on device)
                 mb_obs = b_obs[batch_indices]
                 mb_actions = b_actions[batch_indices]
                 mb_old_log_probs = b_log_probs[batch_indices]
@@ -226,6 +233,9 @@ def train_ppo():
                 nn.utils.clip_grad_norm_(policy.parameters(), MAX_GRAD_NORM)
                 optimizer.step()
         
+        # Calculate optimization time
+        opt_time = time.time() - opt_start_time
+        
         # Print stats
         if len(episode_rewards) > 0:
             mean_reward = np.mean(episode_rewards)
@@ -236,14 +246,13 @@ def train_ppo():
         
         print(f"Epoch {epoch + 1}/{EPOCHS} | Steps: {training_steps} | "
               f"Mean Reward: {mean_reward:.2f} | Min/Max: {min_reward:.2f}/{max_reward:.2f} | "
-              f"Steps/s: {steps_per_second:.2f}")
+              f"Steps/s: {steps_per_second:.2f} | Opt Time: {opt_time:.2f}s")
         
         # Reset rewards tracking
         episode_rewards = []
         
         # Save model periodically
-        # if (epoch + 1) % 10 == 0 or epoch == EPOCHS - 1:
-        if epoch == EPOCHS - 1:
+        if (epoch + 1) % 100 == 0 or epoch == EPOCHS - 1:  # Save every 100 epochs
             torch.save({
                 'model_state_dict': policy.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
@@ -252,7 +261,7 @@ def train_ppo():
             }, os.path.join(SAVE_DIR, f"audio_rl_model_epoch_{epoch + 1}.pt"))
             
             # Export audio example from the best-performing environment
-            # env.export_audio(0, f"audio_sample_epoch_{epoch + 1}.wav")
+            env.export_audio(0, f"audio_sample_epoch_{epoch + 1}.wav")
     
     # Final cleanup
     env.close()
@@ -262,4 +271,11 @@ def train_ppo():
     print(f"Average steps/s: {training_steps / total_time:.2f}")
 
 if __name__ == "__main__":
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+        print("Using MPS device (Apple GPU)!")
+    else:
+        device = torch.device("cpu")
+        print("MPS device not found, using CPU instead.")
+        
     train_ppo()

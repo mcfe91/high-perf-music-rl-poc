@@ -4,9 +4,11 @@ from parallel_audio_rl import ParallelAudioRL
 from train import PolicyNetwork
 import os
 
-def test_model(model_path="models/audio_rl_model_epoch_50.pt"):
+ACTION_DIM = 80
+
+def test_model(model_path="models/audio_rl_model_epoch_200.pt"):
     # Load model
-    policy = PolicyNetwork(128, 16)
+    policy = PolicyNetwork(128, ACTION_DIM)
     checkpoint = torch.load(model_path)
     policy.load_state_dict(checkpoint['model_state_dict'])
     policy.eval()
@@ -18,12 +20,12 @@ def test_model(model_path="models/audio_rl_model_epoch_50.pt"):
     os.makedirs("audio_samples", exist_ok=True)
     
     # Generate samples
-    num_samples = 1
+    num_samples = 5
     print(f"Generating {num_samples} audio samples...")
     
     # Define reward threshold and maximum steps
-    reward_threshold = 3.0
-    max_steps = 10000
+    reward_threshold = 4.0
+    max_steps = 500
     
     for i in range(num_samples):
         # Reset environment for each sample

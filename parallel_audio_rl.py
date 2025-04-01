@@ -6,10 +6,10 @@ import ctypes
 import time
 
 # Constants
-NUM_ENVS = 64
+NUM_ENVS = 1024
 ENVS_PER_WORKER = 4
 OBS_DIM = 128
-ACTION_DIM = 16
+ACTION_DIM = 80
 
 # Load C library
 lib_path = os.path.join(os.path.dirname(__file__), "libaudio_rl.cpython-311-darwin.so")

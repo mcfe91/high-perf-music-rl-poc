@@ -10,9 +10,9 @@
 // Constants
 #define NUM_TRACKS 4
 #define OBS_DIM 128
-#define ACTION_DIM 16
-#define SAMPLE_RATE 22050
-#define BUFFER_SIZE 44100  // 1 bar at 120 BPM (2 seconds)
+#define ACTION_DIM 80
+#define SAMPLE_RATE 44100
+#define BUFFER_SIZE 44100 * 2 // 1 bar at 120 BPM (2 seconds)
 
 // Audio environment structure (all pre-allocated)
 typedef struct {
@@ -82,11 +82,11 @@ void init_environment(AudioEnvironment* env) {
         
         // Set up a basic pattern
         memset(env->tracks[t].steps, 0, sizeof(env->tracks[t].steps));
-        env->tracks[t].steps[0] = true;                 // Beat on first step
-        if (t == 0) env->tracks[t].steps[8] = true;     // Bass on 3rd beat
-        if (t == 1) env->tracks[t].steps[4] = true;     // Snare on 2nd beat
-        if (t == 2) env->tracks[t].steps[2] = env->tracks[t].steps[6] = 
-                   env->tracks[t].steps[10] = env->tracks[t].steps[14] = true; // Hi-hat
+        // env->tracks[t].steps[0] = true;                 // Beat on first step
+        // if (t == 0) env->tracks[t].steps[8] = true;     // Bass on 3rd beat
+        // if (t == 1) env->tracks[t].steps[4] = true;     // Snare on 2nd beat
+        // if (t == 2) env->tracks[t].steps[2] = env->tracks[t].steps[6] = 
+        //            env->tracks[t].steps[10] = env->tracks[t].steps[14] = true; // Hi-hat
     }
     
     // Initialize global state
@@ -283,6 +283,20 @@ void apply_action(AudioEnvironment* env, const float* action) {
     if (action_idx < ACTION_DIM) {
         env->master_volume += action[action_idx] * 0.1f;
         env->master_volume = std::min(1.0f, std::max(0.0f, env->master_volume));
+        action_idx++;
+    }
+
+    // Apply step updates (16 steps per track, 4 tracks)
+    for (int t = 0; t < NUM_TRACKS; t++) {
+        for (int s = 0; s < 16; s++) {
+            if (action_idx < ACTION_DIM) {
+                // Toggling (treat > 0.1 as "flip state")
+                if (action[action_idx] > 0.1f) {
+                    env->tracks[t].steps[s] = !env->tracks[t].steps[s];
+                }
+                action_idx++;
+            }
+        }
     }
 }
 
@@ -294,33 +308,30 @@ float calculate_reward(AudioEnvironment* env) {
     float spectral_centroid = 0.0f;  // Simplified approximation
     float dynamic_range = 0.0f;
     
-    // Use a subset of the buffer for reward calculation (same as original)
-    const int sample_window = 512;
-    
     // Calculate RMS and peak
-    for (int i = 0; i < sample_window; i++) {
+    for (int i = 0; i < BUFFER_SIZE; i++) {
         float sample = env->master_buffer[i];
         rms += sample * sample;
         if (fabs(sample) > peak) peak = fabs(sample);
     }
-    rms = sqrtf(rms / sample_window);
+    rms = sqrtf(rms / BUFFER_SIZE);
     
     // Approximate spectral centroid using zero-crossing rate (very simplified)
     int zero_crossings = 0;
-    for (int i = 1; i < sample_window; i++) {
+    for (int i = 1; i < BUFFER_SIZE; i++) {
         if ((env->master_buffer[i] >= 0 && env->master_buffer[i-1] < 0) ||
             (env->master_buffer[i] < 0 && env->master_buffer[i-1] >= 0)) {
             zero_crossings++;
         }
     }
-    spectral_centroid = (float)zero_crossings / sample_window;
+    spectral_centroid = (float)zero_crossings / BUFFER_SIZE;
     
     // Approximate dynamic range
     float sum_of_diffs = 0.0f;
-    for (int i = 1; i < sample_window; i++) {
+    for (int i = 1; i < BUFFER_SIZE; i++) {
         sum_of_diffs += fabs(env->master_buffer[i] - env->master_buffer[i-1]);
     }
-    dynamic_range = sum_of_diffs / sample_window;
+    dynamic_range = sum_of_diffs / BUFFER_SIZE;
     
     // Calculate reward components
     float reward = 0.0f;
@@ -405,16 +416,15 @@ void write_observations(AudioEnvironment* env) {
         if (obs_idx < OBS_DIM) env->observation_ptr[obs_idx++] = env->effects.delay_feedback;
         
         // Write audio features
-        // Calculate basic features from the first 512 samples
+        // Calculate basic features from BUFFER_SIZE samples
         float rms = 0.0f;
         float peak = 0.0f;
-        const int sample_window = 512;
         
-        for (int i = 0; i < sample_window; i++) {
+        for (int i = 0; i < BUFFER_SIZE; i++) {
             rms += env->master_buffer[i] * env->master_buffer[i];
             if (fabs(env->master_buffer[i]) > peak) peak = fabs(env->master_buffer[i]);
         }
-        rms = sqrtf(rms / sample_window);
+        rms = sqrtf(rms / BUFFER_SIZE);
         
         if (obs_idx < OBS_DIM) env->observation_ptr[obs_idx++] = rms;
         if (obs_idx < OBS_DIM) env->observation_ptr[obs_idx++] = peak;
