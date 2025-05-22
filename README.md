@@ -1,4 +1,4 @@
-# Audio Reinforcement Learning Environment
+# Audio Reinforcement Learning Environment (Proof of concept)
 
 A high-performance audio reinforcement learning environment that follows the principles of PufferLib to achieve maximum training throughput.
 
