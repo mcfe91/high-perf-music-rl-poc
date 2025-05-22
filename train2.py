@@ -9,11 +9,11 @@ import os
 # Training Configuration
 NUM_ENVS = 1024
 OBS_DIM = 128
-ACTION_DIM = 80
-LEARNING_RATE = 3e-4
+ACTION_DIM = 80 + 4 * 16 * 4 # (336)
+LEARNING_RATE = 5e-4
 GAMMA = 0.90
 EPOCHS = 1000
-STEPS_PER_EPOCH = 500
+STEPS_PER_EPOCH = 50
 BATCH_SIZE = 256 + 256
 CLIP_RATIO = 0.2
 VALUE_COEF = 0.5
@@ -260,8 +260,8 @@ def train_ppo():
                 'steps': training_steps,
             }, os.path.join(SAVE_DIR, f"audio_rl_model_epoch_{epoch + 1}.pt"))
             
-            # Export audio example from the best-performing environment
-            env.export_audio(0, f"audio_sample_epoch_{epoch + 1}.wav")
+            # # Export audio example from the best-performing environment
+            # env.export_audio(0, f"audio_samples/audio_sample_eval_epoch_{epoch + 1}.wav")
     
     # Final cleanup
     env.close()

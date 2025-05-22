@@ -7,9 +7,9 @@ import time
 
 # Constants
 NUM_ENVS = 1024
-ENVS_PER_WORKER = 4
+ENVS_PER_WORKER = 85
 OBS_DIM = 128
-ACTION_DIM = 80
+ACTION_DIM = 80 + 4 * 16 * 4 # + Tracks * Steps * Params (336)
 
 # Load C library
 lib_path = os.path.join(os.path.dirname(__file__), "libaudio_rl.cpython-311-darwin.so")

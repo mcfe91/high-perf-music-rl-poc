@@ -10,9 +10,9 @@
 // Constants
 #define NUM_TRACKS 4
 #define OBS_DIM 128
-#define ACTION_DIM 80
-#define SAMPLE_RATE 44100
-#define BUFFER_SIZE 44100 * 2 // 1 bar at 120 BPM (2 seconds)
+#define ACTION_DIM 80 + 4 * 16 * 4
+#define SAMPLE_RATE 22050
+#define BUFFER_SIZE SAMPLE_RATE * 2 // 1 bar at 120 BPM (2 seconds)
 
 // Audio environment structure (all pre-allocated)
 typedef struct {
@@ -27,15 +27,19 @@ typedef struct {
         float filter_resonance;    // 0-1: No resonance to high resonance
         float envelope_attack;     // 0-1: 0ms to 1000ms
         float envelope_release;    // 0-1: 0ms to 2000ms
-        float pitch;               // MIDI note (36-84)
+        float pitch;               // MIDI note (36-84) TODO: remove from everywhere... obs, .py files etc...
         float volume;              // 0-1: Silent to unity gain
         float pan;                 // -1 to 1: Left to right
         
         // Filter state variables (pre-allocated)
         float filter_state[2];
         
-        // Sequencer data
-        bool steps[16];            // 16-step pattern
+        struct Note {
+            bool active;              // Is the note playing
+            float pitch;              // Absolute MIDI note value
+            int duration_samples;     // Duration in samples
+            float velocity;           // Volume/intensity (0.0-1.0)
+        } notes[16];                  // 16-step pattern (one note per step)
     } tracks[NUM_TRACKS];
     
     // Global state
@@ -52,7 +56,7 @@ typedef struct {
         
         // Effect state variables (pre-allocated)
         float reverb_buffer[8192]; // Reverb memory
-        float delay_buffer[22050]; // 1 second delay at 22.05kHz
+        float delay_buffer[SAMPLE_RATE]; // 1 second delay at 22.05kHz
         int delay_index;           // Current position in delay buffer
     } effects;
     
@@ -81,12 +85,19 @@ void init_environment(AudioEnvironment* env) {
         memset(env->tracks[t].filter_state, 0, sizeof(env->tracks[t].filter_state));
         
         // Set up a basic pattern
-        memset(env->tracks[t].steps, 0, sizeof(env->tracks[t].steps));
         // env->tracks[t].steps[0] = true;                 // Beat on first step
         // if (t == 0) env->tracks[t].steps[8] = true;     // Bass on 3rd beat
         // if (t == 1) env->tracks[t].steps[4] = true;     // Snare on 2nd beat
         // if (t == 2) env->tracks[t].steps[2] = env->tracks[t].steps[6] = 
         //            env->tracks[t].steps[10] = env->tracks[t].steps[14] = true; // Hi-hat
+
+        // Initialize notes (replace the old steps initialization)
+        for (int s = 0; s < 16; s++) {
+            env->tracks[t].notes[s].active = false;
+            env->tracks[t].notes[s].pitch = 48.0f + t * 12.0f;  // C3, C4, C5, C6
+            env->tracks[t].notes[s].duration_samples = BUFFER_SIZE / 16; // One step
+            env->tracks[t].notes[s].velocity = 0.7f;
+        }
     }
     
     // Initialize global state
@@ -120,22 +131,26 @@ void generate_audio(AudioEnvironment* env) {
         memset(env->track_buffers[t], 0, sizeof(env->track_buffers[t]));
         
         // Process each step in the pattern
-        for (int step = 0; step < 16; step++) {
+        for (int s = 0; s < 16; s++) {
             // Check if this track should play a note at this step
-            if (env->tracks[t].steps[step]) {
-                // Convert MIDI note to frequency
-                float frequency = 440.0f * powf(2.0f, (env->tracks[t].pitch - 69.0f) / 12.0f);
+            if (env->tracks[t].notes[s].active) {
+                // Calculate start and end samples for this note
+                int step_start = s * samples_per_step;
+                int note_duration = env->tracks[t].notes[s].duration_samples;
+                int step_end = step_start + note_duration;
                 
-                // Calculate start and end samples for this step
-                int step_start = step * samples_per_step;
-                int step_end = (step + 1) * samples_per_step;
+                // Ensure we don't exceed buffer bounds
+                step_end = std::min(step_end, BUFFER_SIZE);
+                
+                // Calculate frequency from MIDI note
+                float frequency = 440.0f * powf(2.0f, (env->tracks[t].notes[s].pitch - 69.0f) / 12.0f);
                 
                 // Calculate oscillator values based on parameters
                 float mix = env->tracks[t].oscillator_mix;
                 
-                // Generate simple waveform (mix between sine and saw)
+                // Generate waveform
                 for (int i = step_start; i < step_end; i++) {
-                    // Calculate phase relative to step start
+                    // Calculate phase
                     float sample_offset = (float)(i - step_start);
                     float phase = sample_offset / SAMPLE_RATE * frequency;
                     phase -= floorf(phase); // Normalize to 0-1
@@ -145,24 +160,41 @@ void generate_audio(AudioEnvironment* env) {
                     float saw_val = 2.0f * phase - 1.0f;
                     
                     // Mix between sine and saw
-                    env->track_buffers[t][i] = sine_val * (1.0f - mix) + saw_val * mix;
+                    env->track_buffers[t][i] += (sine_val * (1.0f - mix) + saw_val * mix) * env->tracks[t].notes[s].velocity;
                 }
                 
-                // Apply simple envelope
+                // Apply envelope with release that can extend past note end
                 float attack = env->tracks[t].envelope_attack * SAMPLE_RATE * 0.1f;
                 float release = env->tracks[t].envelope_release * SAMPLE_RATE * 0.5f;
                 
-                for (int i = step_start; i < step_end; i++) {
+                // Calculate release end (possibly beyond note end)
+                int release_end = step_end + (int)release;
+                release_end = std::min(release_end, BUFFER_SIZE);
+                
+                // Apply envelope
+                for (int i = step_start; i < release_end; i++) {
                     float envelope = 1.0f;
                     float position = (float)(i - step_start);
                     
+                    // Attack phase
                     if (position < attack) {
                         envelope = position / attack;
-                    } else if (position > samples_per_step - release) {
-                        envelope = (samples_per_step - position) / release;
+                    } 
+                    // Release phase (only if beyond note duration)
+                    else if (i >= step_end) {
+                        envelope = 1.0f - ((float)(i - step_end) / release);
+                        envelope = std::max(0.0f, envelope);
                     }
                     
-                    env->track_buffers[t][i] *= envelope;
+                    // Apply envelope
+                    if (i < step_end) {
+                        // For main note body
+                        env->track_buffers[t][i] *= envelope;
+                    } else {
+                        // For release tail - continue the last generated sample but fade it out
+                        float last_sample = env->track_buffers[t][step_end-1];
+                        env->track_buffers[t][i] += last_sample * envelope;
+                    }
                 }
                 
                 // Apply simple lowpass filter
@@ -286,14 +318,44 @@ void apply_action(AudioEnvironment* env, const float* action) {
         action_idx++;
     }
 
-    // Apply step updates (16 steps per track, 4 tracks)
-    for (int t = 0; t < NUM_TRACKS; t++) {
-        for (int s = 0; s < 16; s++) {
+    int samples_per_step = BUFFER_SIZE / 16;
+    
+    // Process each track
+    for (int t = 0; t < NUM_TRACKS && action_idx < ACTION_DIM; t++) {
+        // Process each step
+        for (int s = 0; s < 16 && action_idx < ACTION_DIM; s++) {
+            // Action values are in range [-1, 1]
+            
+            // Handle on/off state
+            if (action[action_idx] > 0.1f) {
+                env->tracks[t].notes[s].active = true;
+            } else if (action[action_idx] < -0.1f) {
+                env->tracks[t].notes[s].active = false;
+            }
+            action_idx++;
+            
+            // Handle pitch - store the actual MIDI note value
             if (action_idx < ACTION_DIM) {
-                // Toggling (treat > 0.1 as "flip state")
-                if (action[action_idx] > 0.1f) {
-                    env->tracks[t].steps[s] = !env->tracks[t].steps[s];
-                }
+                // Convert from [-1, 1] to MIDI note offset (-12 to +12 semitones)
+                float pitch_offset = action[action_idx] * 12.0f;
+                // Apply to base pitch and store the absolute note value
+                env->tracks[t].notes[s].pitch = 48.0f + t * 12.0f + pitch_offset;
+                action_idx++;
+            }
+            
+            // Handle duration - store in actual samples
+            if (action_idx < ACTION_DIM) {
+                // Convert from [-1, 1] to [0, 4] steps
+                float steps_duration = (action[action_idx] + 1.0f) * 2.0f;
+                // Convert steps to samples and store
+                env->tracks[t].notes[s].duration_samples = (int)(steps_duration * samples_per_step);
+                action_idx++;
+            }
+            
+            // Handle velocity - store as 0.0-1.0 for amplitude scaling
+            if (action_idx < ACTION_DIM) {
+                // Convert from [-1, 1] to [0, 1]
+                env->tracks[t].notes[s].velocity = (action[action_idx] + 1.0f) * 0.5f;
                 action_idx++;
             }
         }
@@ -369,6 +431,8 @@ float calculate_reward(AudioEnvironment* env) {
 void write_observations(AudioEnvironment* env) {
     if (env->observation_ptr) {
         int obs_idx = 0;
+
+        int samples_per_step = BUFFER_SIZE / 16;
         
         // Write track parameters (4 tracks * 8 parameters = 32 values)
         for (int t = 0; t < NUM_TRACKS && obs_idx < OBS_DIM; t++) {
@@ -400,12 +464,26 @@ void write_observations(AudioEnvironment* env) {
         // Write sequencer state (4 tracks * 16 steps = 64 values)
         for (int t = 0; t < NUM_TRACKS && obs_idx < OBS_DIM; t++) {
             for (int s = 0; s < 16 && obs_idx < OBS_DIM; s++) {
-                env->observation_ptr[obs_idx++] = env->tracks[t].steps[s] ? 1.0f : 0.0f;
+                // Active state (0.0 or 1.0)
+                if (obs_idx < OBS_DIM) 
+                    env->observation_ptr[obs_idx++] = env->tracks[t].notes[s].active ? 1.0f : 0.0f;
+                
+                // Pitch (normalized to 0-1 range)
+                if (obs_idx < OBS_DIM) 
+                    env->observation_ptr[obs_idx++] = (env->tracks[t].notes[s].pitch - 36.0f) / 48.0f;
+                
+                // Duration (normalized)
+                if (obs_idx < OBS_DIM) 
+                    env->observation_ptr[obs_idx++] = (float)env->tracks[t].notes[s].duration_samples / (samples_per_step * 4.0f);
+                
+                // Velocity (already 0-1)
+                if (obs_idx < OBS_DIM) 
+                    env->observation_ptr[obs_idx++] = env->tracks[t].notes[s].velocity;
             }
         }
         
         // Write global parameters
-        if (obs_idx < OBS_DIM) env->observation_ptr[obs_idx++] = (float)env->current_step / 16.0f;
+        if (obs_idx < OBS_DIM) env->observation_ptr[obs_idx++] = (float)env->current_step / 16.0f; // TODO: remove, we dont use this anymore...
         if (obs_idx < OBS_DIM) env->observation_ptr[obs_idx++] = (env->tempo - 60.0f) / 120.0f;
         if (obs_idx < OBS_DIM) env->observation_ptr[obs_idx++] = env->master_volume;
         
